@@ -53,28 +53,28 @@ class MongoDBPipeline(BaseItemExporter):
         'fsync': False,
         'write_concern': 0,
         'database': 'scrapy-mongodb',
-        'collection': 'items',
         'replica_set': None,
-        'unique_key': None,
-        'buffer': None,
-        'append_timestamp': False,
-        'stop_on_duplicate': 0,
+        'collection': {
+            'default': {
+                'name': 'items',
+                'unique_key': None,
+                'buffer': None,
+                'append_timestamp': False,
+                'stop_on_duplicate': 0
+            }
+        }
     }
 
     # Item buffer
-    current_item = 0
-    item_buffer = []
+    current_item = {}
+    item_buffer = {}
 
     # Duplicate key occurence count
-    duplicate_key_count = 0
+    duplicate_key_count = {}
 
     def load_spider(self, spider):
         self.crawler = spider.crawler
         self.settings = spider.settings
-
-        # Versions prior to 0.25
-        if not hasattr(spider, 'update_settings') and hasattr(spider, 'custom_settings'):
-            self.settings.setdict(spider.custom_settings or {}, priority='project')
 
     def open_spider(self, spider):
         self.load_spider(spider)
@@ -98,38 +98,49 @@ class MongoDBPipeline(BaseItemExporter):
 
         # Set up the collection
         database = connection[self.config['database']]
-        self.collection = database[self.config['collection']]
-        log.msg(u'Connected to MongoDB {0}, using "{1}/{2}"'.format(
-            self.config['uri'],
-            self.config['database'],
-            self.config['collection']))
+        self.collection = {}
+        self.stop_on_duplicate = {}
+        self.buffer_settings = {}
+        for itype, collection in self.config['collection'].items():
+            self.collection[itype] = database[collection['name']]
+            if collection['buffer']:
+                self.buffer_settings[itype] = collection['buffer']
+            else:
+                self.buffer_settings[itype] = 0
+            self.item_buffer[itype] = []
+            self.current_item[itype] = 0 
 
-        # Ensure unique index
-        if self.config['unique_key']:
-            self.collection.ensure_index(self.config['unique_key'], unique=True)
-            log.msg('uEnsuring index for key {0}'.format(
-                self.config['unique_key']))
+            # Ensure unique index
+            if collection['unique_key']:
+                self.collection[itype].ensure_index(collection['unique_key'], unique=True)
+                log.msg('uEnsuring index for key {0}'.format(
+                collection['unique_key']))
 
-        # Get the duplicate on key option
-        if self.config['stop_on_duplicate']:
-            tmpValue = self.config['stop_on_duplicate']
-            if tmpValue < 0:
-                log.msg(
-                    (
-                        u'Negative values are not allowed for'
-                        u' MONGODB_STOP_ON_DUPLICATE option.'
-                    ),
-                    level=log.ERROR
-                )
-                raise SyntaxError(
-                    (
-                        'Negative values are not allowed for'
-                        ' MONGODB_STOP_ON_DUPLICATE option.'
+            # Get the duplicate on key option
+            if collection['stop_on_duplicate']:
+                tmpValue = collection['stop_on_duplicate']
+                if tmpValue < 0:
+                    log.msg(
+                        (
+                            u'Negative values are not allowed for'
+                            u' MONGODB_STOP_ON_DUPLICATE option.'
+                        ),
+                        level=log.ERROR
                     )
-                )
-            self.stop_on_duplicate = self.config['stop_on_duplicate']
-        else:
-            self.stop_on_duplicate = 0
+                    raise SyntaxError(
+                        (
+                            'Negative values are not allowed for'
+                            ' MONGODB_STOP_ON_DUPLICATE option.'
+                        )
+                    )
+                self.stop_on_duplicate[itype] = collection['stop_on_duplicate']
+            else:
+                self.stop_on_duplicate[itype] = 0
+          
+            log.msg(u'Connected to MongoDB {0}, using "{1}/{2}"'.format(
+                self.config['uri'],
+                self.config['database'],
+                collection['name']))
 
     def configure(self):
         """ Configure the MongoDB connection """
@@ -169,29 +180,11 @@ class MongoDBPipeline(BaseItemExporter):
             ('database', 'MONGODB_DATABASE'),
             ('collection', 'MONGODB_COLLECTION'),
             ('replica_set', 'MONGODB_REPLICA_SET'),
-            ('unique_key', 'MONGODB_UNIQUE_KEY'),
-            ('buffer', 'MONGODB_BUFFER_DATA'),
-            ('append_timestamp', 'MONGODB_ADD_TIMESTAMP'),
-            ('stop_on_duplicate', 'MONGODB_STOP_ON_DUPLICATE')
         ]
 
         for key, setting in options:
             if not not_set(self.settings[setting]):
                 self.config[key] = self.settings[setting]
-
-        # Check for illegal configuration
-        if self.config['buffer'] and self.config['unique_key']:
-            log.msg(
-                (
-                    u'IllegalConfig: Settings both MONGODB_BUFFER_DATA '
-                    u'and MONGODB_UNIQUE_KEY is not supported'
-                ),
-                level=log.ERROR)
-            raise SyntaxError(
-                (
-                    u'IllegalConfig: Settings both MONGODB_BUFFER_DATA '
-                    u'and MONGODB_UNIQUE_KEY is not supported'
-                ))
 
     def process_item(self, item, spider):
         """ Process the item and add it to MongoDB
@@ -202,24 +195,29 @@ class MongoDBPipeline(BaseItemExporter):
         :param spider: The spider running the queries
         :returns: Item object
         """
+        itype = type(item).__name__
         item = dict(self._get_serialized_fields(item))
+        if not self.config['collection'][itype]:
+            itype = 'default'
 
-        if self.config['buffer']:
-            self.current_item += 1
+        collection = self.config['collection'][itype]
 
-            if self.config['append_timestamp']:
+        if self.buffer_settings[itype]:
+            self.current_item[itype] += 1
+
+            if collection['append_timestamp']:
                 item['scrapy-mongodb'] = {'ts': datetime.datetime.utcnow()}
 
-            self.item_buffer.append(item)
+            self.item_buffer[itype].append(item)
 
-            if self.current_item == self.config['buffer']:
-                self.current_item = 0
-                return self.insert_item(self.item_buffer, spider)
+            if self.current_item[itype] == collection['buffer']:
+                self.current_item[itype] = 0
+                return self.insert_item(self.item_buffer[itype], spider, itype)
 
             else:
                 return item
 
-        return self.insert_item(item, spider)
+        return self.insert_item(item, spider, itype)
 
     def close_spider(self, spider):
         """ Method called when the spider is closed
@@ -228,10 +226,11 @@ class MongoDBPipeline(BaseItemExporter):
         :param spider: The spider running the queries
         :returns: None
         """
-        if self.item_buffer:
-            self.insert_item(self.item_buffer, spider)
+        for itype, item_buffer in self.item_buffer.values:
+            if item_buffer:
+                self.insert_item(item_buffer, spider, itype)
 
-    def insert_item(self, item, spider):
+    def insert_item(self, item, spider, itype):
         """ Process the item and add it to MongoDB
 
         :type item: (Item object) or [(Item object)]
@@ -240,25 +239,27 @@ class MongoDBPipeline(BaseItemExporter):
         :param spider: The spider running the queries
         :returns: Item object
         """
+        collection = self.config['collection'][itype]
+
         if not isinstance(item, list):
             item = dict(item)
 
-            if self.config['append_timestamp']:
+            if collecgtion['append_timestamp']:
                 item['scrapy-mongodb'] = {'ts': datetime.datetime.utcnow()}
 
-        if self.config['unique_key'] is None:
+        if collection['unique_key'] is None:
             try:
-                self.collection.insert(item, continue_on_error=True)
+                self.collection[itype].insert(item, continue_on_error=True)
                 log.msg(
                     u'Stored item(s) in MongoDB {0}/{1}'.format(
-                        self.config['database'], self.config['collection']),
+                        self.config['database'], collection['name']),
                     level=log.DEBUG,
                     spider=spider)
             except errors.DuplicateKeyError:
                 log.msg(u'Duplicate key found', level=log.DEBUG)
-                if (self.stop_on_duplicate > 0):
-                    self.duplicate_key_count += 1
-                    if (self.duplicate_key_count >= self.stop_on_duplicate):
+                if (self.stop_on_duplicate[itype] > 0):
+                    self.duplicate_key_count[itype] += 1
+                    if (self.duplicate_key_count[itype] >= self.stop_on_duplicate[itype]):
                         self.crawler.engine.close_spider(
                             spider,
                             'Number of duplicate key insertion exceeded'
@@ -267,17 +268,17 @@ class MongoDBPipeline(BaseItemExporter):
 
         else:
             key = {}
-            if isinstance(self.config['unique_key'], list):
-                for k in dict(self.config['unique_key']).keys():
+            if isinstance(collection['unique_key'], list):
+                for k in dict(collection['unique_key']).keys():
                     key[k] = item[k]
             else:
-                key[self.config['unique_key']] = item[self.config['unique_key']]
+                key[collection['unique_key']] = item[collection['unique_key']]
 
-            self.collection.update(key, item, upsert=True)
+            self.collection[itype].update(key, item, upsert=True)
 
             log.msg(
                 u'Stored item(s) in MongoDB {0}/{1}'.format(
-                    self.config['database'], self.config['collection']),
+                    self.config['database'], collection['name']),
                 level=log.DEBUG,
                 spider=spider)
 
