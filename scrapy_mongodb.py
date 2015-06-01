@@ -103,39 +103,21 @@ class MongoDBPipeline(BaseItemExporter):
         self.buffer_settings = {}
         for itype, collection in self.config['collection'].items():
             self.collection[itype] = database[collection['name']]
-            if collection['buffer']:
-                self.buffer_settings[itype] = collection['buffer']
-            else:
-                self.buffer_settings[itype] = 0
+            self.buffer_settings[itype] = collection.get('buffer', 0)
             self.item_buffer[itype] = []
             self.current_item[itype] = 0 
 
             # Ensure unique index
-            if collection['unique_key']:
-                self.collection[itype].ensure_index(collection['unique_key'], unique=True)
+            unique_key = collection.get('unique_key')
+            if unique_key:
+                self.collection[itype].ensure_index(unique_key, unique=True)
                 log.msg('uEnsuring index for key {0}'.format(
-                collection['unique_key']))
+                unique_key))
 
             # Get the duplicate on key option
-            if collection['stop_on_duplicate']:
-                tmpValue = collection['stop_on_duplicate']
-                if tmpValue < 0:
-                    log.msg(
-                        (
-                            u'Negative values are not allowed for'
-                            u' MONGODB_STOP_ON_DUPLICATE option.'
-                        ),
-                        level=log.ERROR
-                    )
-                    raise SyntaxError(
-                        (
-                            'Negative values are not allowed for'
-                            ' MONGODB_STOP_ON_DUPLICATE option.'
-                        )
-                    )
-                self.stop_on_duplicate[itype] = collection['stop_on_duplicate']
-            else:
-                self.stop_on_duplicate[itype] = 0
+            self.stop_on_duplicate[itype] = collection.get('stop_on_duplicate', 0)
+            if self.stop_on_duplicate[itype] > 0:
+                self.stop_on_duplicate[itype] = 0 
           
             log.msg(u'Connected to MongoDB {0}, using "{1}/{2}"'.format(
                 self.config['uri'],
@@ -205,15 +187,16 @@ class MongoDBPipeline(BaseItemExporter):
         if self.buffer_settings[itype]:
             self.current_item[itype] += 1
 
-            if collection['append_timestamp']:
+            append_timestamp = collection.get('append_timestamp', None)
+            if append_timestamp:
                 item['scrapy-mongodb'] = {'ts': datetime.datetime.utcnow()}
 
             self.item_buffer[itype].append(item)
 
-            if self.current_item[itype] == collection['buffer']:
+            buffer_size = collection.get('buffer', 0)
+            if self.current_item[itype] == buffer_size:
                 self.current_item[itype] = 0
                 return self.insert_item(self.item_buffer[itype], spider, itype)
-
             else:
                 return item
 
@@ -244,10 +227,12 @@ class MongoDBPipeline(BaseItemExporter):
         if not isinstance(item, list):
             item = dict(item)
 
-            if collecgtion['append_timestamp']:
+            append_timestamp = collection.get('append_timestamp', None)
+            if append_timestamp:
                 item['scrapy-mongodb'] = {'ts': datetime.datetime.utcnow()}
 
-        if collection['unique_key'] is None:
+        unique_key = collection.get('unique_key')
+        if unique_key is None:
             try:
                 self.collection[itype].insert(item, continue_on_error=True)
                 log.msg(
@@ -268,11 +253,11 @@ class MongoDBPipeline(BaseItemExporter):
 
         else:
             key = {}
-            if isinstance(collection['unique_key'], list):
-                for k in dict(collection['unique_key']).keys():
+            if isinstance(unique_key, list):
+                for k in dict(unique_key).keys():
                     key[k] = item[k]
             else:
-                key[collection['unique_key']] = item[collection['unique_key']]
+                key[collection['unique_key']] = item[unique_key]
 
             self.collection[itype].update(key, item, upsert=True)
 
