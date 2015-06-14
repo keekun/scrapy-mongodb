@@ -209,7 +209,7 @@ class MongoDBPipeline(BaseItemExporter):
         :param spider: The spider running the queries
         :returns: None
         """
-        for itype, item_buffer in self.item_buffer.values:
+        for itype, item_buffer in self.item_buffer.items():
             if item_buffer:
                 self.insert_item(item_buffer, spider, itype)
 
